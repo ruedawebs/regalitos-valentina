@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const dynamic = "force-dynamic";
 
@@ -7,12 +8,13 @@ export const dynamic = "force-dynamic";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // Constants
 const MSG_PREFIX = "[V1.5-CONTROL]";
 const OWNER_ID_CHECK = "8343591065";
 
-// Initialize Supabase Admin Client
+// Initialize Clients
 const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
   auth: {
     persistSession: false,
@@ -20,9 +22,15 @@ const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
   },
 });
 
+let genAI: GoogleGenerativeAI | null = null;
+if (GEMINI_API_KEY) {
+  genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+}
+
 // Types
 type BotState =
   | "IDLE"
+  | "AWAITING_APPROVAL"
   | "AWAITING_NAME"
   | "AWAITING_PRICE"
   | "AWAITING_CATEGORY"
@@ -70,6 +78,18 @@ interface TelegramUpdate {
 }
 
 // Helpers
+async function logError(error: any, payload: any) {
+  console.error("❌ Log Error:", error);
+  try {
+    await supabase.from("antigravity_logs").insert({
+      error: JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      payload: payload,
+    });
+  } catch (e) {
+    console.error("Failed to write to antigravity_logs", e);
+  }
+}
+
 async function sendMessage(chatId: number, text: string, reply_markup?: any) {
   if (!TELEGRAM_BOT_TOKEN) return;
   const fullText = `${MSG_PREFIX} ${text}`;
@@ -103,16 +123,23 @@ async function getFileUrl(fileId: string): Promise<string | null> {
   return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
 }
 
+async function getFileBuffer(url: string): Promise<Buffer | null> {
+  try {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    const arrayBuffer = await blob.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch (e) {
+    console.error("Buffer fetch failed", e);
+    return null;
+  }
+}
+
 async function uploadImageToSupabase(
-  fileUrl: string,
+  buffer: Buffer,
   fileName: string,
 ): Promise<string | null> {
   try {
-    const res = await fetch(fileUrl);
-    const blob = await res.blob();
-    const arrayBuffer = await blob.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
     const { data, error } = await supabase.storage
       .from("catalog-images")
       .upload(fileName, buffer, {
@@ -133,6 +160,29 @@ async function uploadImageToSupabase(
   } catch (e) {
     console.error("Image upload failed:", e);
     return null;
+  }
+}
+
+async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
+  if (!genAI) return "Descripción automática no disponible (Token faltante).";
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-pro-vision" });
+    const prompt =
+      "Describe este producto para una tienda de regalos. Sé breve, atractivo y enfocado en la venta. Máximo 2 frases.";
+    const result = await model.generateContent([
+      prompt,
+      {
+        inlineData: {
+          data: imageBuffer.toString("base64"),
+          mimeType: "image/jpeg",
+        },
+      },
+    ]);
+    const response = await result.response;
+    return response.text();
+  } catch (e: any) {
+    console.error("Gemini Error:", e);
+    return `Error generando descripción: ${e.message}`;
   }
 }
 
@@ -166,12 +216,7 @@ async function listProductsAsButtons(
       .limit(10);
 
     if (error) {
-      console.error("DB Error listing products:", error);
-      await sendMessage(
-        chatId,
-        `⚠️ [V1.5-ERROR] No puedo acceder a la tabla products. Verifica los logs. ${error.message}`,
-      );
-      return;
+      throw error;
     }
 
     if (!products || products.length === 0) {
@@ -196,24 +241,22 @@ async function listProductsAsButtons(
       keyboard,
     );
   } catch (e: any) {
-    console.error("Exception listing products:", e);
-    await sendMessage(
-      chatId,
-      `⚠️ [V1.5-ERROR] Excepción listando productos: ${e.message}`,
-    );
+    await logError(e, { action, chatId });
+    await sendMessage(chatId, `⚠️ [V1.5-ERROR] ${e.message}`);
   }
 }
 
 // Main Webhook Handler
 export async function POST(req: Request) {
+  let update: TelegramUpdate | null = null;
   try {
-    const update: TelegramUpdate = await req.json();
-    // Debug Logging V1.5
-    const fromId = update.message?.from.id || update.callback_query?.from.id;
+    update = await req.json();
+    // Debug Logging
+    const fromId = update?.message?.from.id || update?.callback_query?.from.id;
     console.log("📥 [V1.5] Mensaje Recibido de ID: " + fromId);
 
-    const message = update.message || update.callback_query?.message;
-    const fromUser = update.message?.from || update.callback_query?.from;
+    const message = update?.message || update?.callback_query?.message;
+    const fromUser = update?.message?.from || update?.callback_query?.from;
 
     if (!message || !fromUser) {
       return NextResponse.json({ ok: true });
@@ -222,9 +265,7 @@ export async function POST(req: Request) {
     const chatId = message.chat.id;
     const userId = fromUser.id;
 
-    // 1. Verify Owner (Double check: Env/DB and User Request)
-    console.log("🔍 Consultando tg_owner_id en DB...");
-
+    // 1. Verify Owner
     let config = null;
     try {
       const { data, error } = await supabase
@@ -233,27 +274,14 @@ export async function POST(req: Request) {
         .eq("id", 1)
         .single();
 
-      if (error) {
-        console.error("Config fetch error:", error);
-        // Fallback response for 42703 or other DB errors
-        await sendMessage(
-          chatId,
-          `⚠️ [V1.5-ERROR] No puedo acceder a la tabla config. Verifica los logs de Vercel. ${error.message}`,
-        );
-        return NextResponse.json({ ok: true });
-      }
+      if (error) throw error;
       config = data;
     } catch (e: any) {
-      console.error("Config fetch exception:", e);
+      await logError(e, { userId, stage: "config_fetch" });
       await sendMessage(
         chatId,
-        `⚠️ [V1.5-ERROR] Excepción crítica accediendo a DB. ${e.message}`,
+        `⚠️ [V1.5-ERROR] Error DB Config: ${e.message}`,
       );
-      return NextResponse.json({ ok: true });
-    }
-
-    if (!config) {
-      // Should be caught above, but safety check
       return NextResponse.json({ ok: true });
     }
 
@@ -261,8 +289,8 @@ export async function POST(req: Request) {
     const isHardcodedOwner = String(userId) === OWNER_ID_CHECK;
 
     if (!isDbOwner && !isHardcodedOwner) {
-      console.warn("Unauthorized access attempt:", userId);
-      await sendMessage(chatId, `⚠️ Acceso denegado. Tu ID es ${userId}.`);
+      console.warn("Unauthorized:", userId);
+      await sendMessage(chatId, `⚠️ Acceso denegado. ID: ${userId}.`);
       return NextResponse.json({ ok: true });
     }
 
@@ -270,14 +298,14 @@ export async function POST(req: Request) {
     let draft = config.draft_product || {};
 
     // --- HANDLE CALLBACK QUERIES ---
-    if (update.callback_query) {
+    if (update?.callback_query) {
       const data = update.callback_query.data;
       await answerCallbackQuery(update.callback_query.id);
 
       if (data === "cmd_create") {
         await sendMessage(
           chatId,
-          "Iniciando creación. 📸 Por favor, envía la foto del regalito.",
+          "📸 Envía la foto del regalito para analizarla con IA.",
         );
         draft = {};
         currentState = "IDLE";
@@ -290,6 +318,16 @@ export async function POST(req: Request) {
       } else if (data === "cmd_edit") {
         await listProductsAsButtons(chatId, "edit");
         currentState = "SELECTING_PRODUCT_EDIT";
+      } else if (data === "gemini_approve") {
+        currentState = "AWAITING_NAME";
+        await sendMessage(
+          chatId,
+          "✅ Descripción aprobada. ¿Cuál es el nombre del producto?",
+        );
+      } else if (data === "gemini_retry") {
+        currentState = "IDLE";
+        draft = {};
+        await sendMessage(chatId, "🔄 Reiniciando. Envía otra foto.");
       } else if (data.startsWith("act_disable_")) {
         const productId = data.split("_")[2];
         const { data: prod } = await supabase
@@ -335,54 +373,75 @@ export async function POST(req: Request) {
     }
 
     // --- HANDLE TEXT COMMANDS ---
-    if (update.message?.text === "/start") {
-      try {
-        await supabase
-          .from("config")
-          .update({ current_state: "IDLE", draft_product: {} })
-          .eq("id", 1);
-        await sendMainMenu(chatId);
-      } catch (e: any) {
-        await sendMessage(
-          chatId,
-          `⚠️ [V1.5-ERROR] Error al reiniciar estado. ${e.message}`,
-        );
-      }
+    if (update?.message?.text === "/start") {
+      await supabase
+        .from("config")
+        .update({ current_state: "IDLE", draft_product: {} })
+        .eq("id", 1);
+      await sendMainMenu(chatId);
       return NextResponse.json({ ok: true });
     }
 
-    if (update.message?.text === "/status") {
-      const { count, error: countError } = await supabase
+    if (update?.message?.text === "/status") {
+      const { count } = await supabase
         .from("products")
         .select("*", { count: "exact", head: true });
-      const productCount = countError ? "Error" : count;
-      await sendMessage(
-        chatId,
-        `✅ Estado Operativo. Productos: ${productCount}.`,
-      );
+      await sendMessage(chatId, `✅ Estado Operativo. Productos: ${count}.`);
       return NextResponse.json({ ok: true });
     }
 
     // --- FSM LOGIC ---
-    if (!update.message) return NextResponse.json({ ok: true });
+    if (!update?.message) return NextResponse.json({ ok: true });
 
     switch (currentState) {
       case "IDLE":
         if (update.message.photo) {
+          await sendMessage(chatId, "✨ Analizando imagen con Gemini 2.0...");
           const photo = update.message.photo[update.message.photo.length - 1];
           const fileUrl = await getFileUrl(photo.file_id);
+
           if (fileUrl) {
-            const fileName = `${Date.now()}.jpg`;
-            const publicUrl = await uploadImageToSupabase(fileUrl, fileName);
-            if (publicUrl) {
-              draft = { ...draft, image_url: publicUrl };
-              currentState = "AWAITING_NAME";
-              await sendMessage(
-                chatId,
-                "📸 ¡Foto recibida! Ahora dime, ¿cuál es el nombre de este regalo?",
+            const imageBuffer = await getFileBuffer(fileUrl);
+            if (imageBuffer) {
+              const fileName = `${Date.now()}.jpg`;
+              // Upload
+              const publicUrl = await uploadImageToSupabase(
+                imageBuffer,
+                fileName,
               );
+
+              // Gemini Vision
+              const description = await generateGeminiDescription(imageBuffer);
+
+              if (publicUrl) {
+                draft = {
+                  ...draft,
+                  image_url: publicUrl,
+                  ai_description: description,
+                };
+                currentState = "AWAITING_APPROVAL";
+
+                const keyboard = {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "✅ Aprobar y Publicar",
+                        callback_data: "gemini_approve",
+                      },
+                    ],
+                    [{ text: "🔄 Reintentar", callback_data: "gemini_retry" }],
+                  ],
+                };
+                await sendMessage(
+                  chatId,
+                  `🤖 **Descripción Sugerida:**\n"${description}"\n\n¿Deseas usar esta descripción?`,
+                  keyboard,
+                );
+              } else {
+                await sendMessage(chatId, "Error subiendo imagen.");
+              }
             } else {
-              await sendMessage(chatId, "Error subiendo imagen.");
+              await sendMessage(chatId, "Error descargando imagen.");
             }
           }
         } else if (update.message.text && update.message.text !== "/start") {
@@ -391,6 +450,14 @@ export async function POST(req: Request) {
             "Envía una foto para crear un producto o usa el menú /start.",
           );
         }
+        break;
+
+      case "AWAITING_APPROVAL":
+        // Should be handled by callback, but if text text sent:
+        await sendMessage(
+          chatId,
+          "Por favor usa los botones de Aprobar o Reintentar.",
+        );
         break;
 
       case "AWAITING_NAME":
@@ -428,13 +495,15 @@ export async function POST(req: Request) {
             price: draft.price,
             image_url: draft.image_url,
             category: category,
+            ai_description: draft.ai_description || null,
+            approval_status: "approved", // Auto approve if flow completes
             in_stock: true,
           };
           const { error: insertError } = await supabase
             .from("products")
             .insert(newProduct);
           if (insertError) {
-            await sendMessage(chatId, `Error DB: ${insertError.message}`);
+            throw insertError;
           } else {
             await sendMessage(chatId, "✅ Producto guardado con éxito");
           }
@@ -453,7 +522,7 @@ export async function POST(req: Request) {
         break;
 
       default:
-        currentState = "IDLE";
+        await sendMessage(chatId, "Opción no válida.");
         break;
     }
 
@@ -464,15 +533,15 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true });
   } catch (error: any) {
-    console.error("❌ Error en Webhook:", error); // Keep error log specific for Vercel
+    await logError(error, update);
+    // Try to notify
     try {
-      const payload = (await req.clone().json()) as TelegramUpdate;
       const chatId =
-        payload.message?.chat.id || payload.callback_query?.message?.chat.id;
+        update?.message?.chat.id || update?.callback_query?.message?.chat.id;
       if (chatId) {
         await sendMessage(
           chatId,
-          `⚠️ [V1.5-ERROR] Excepción general: ${error.message || error}`,
+          `⚠️ [V1.5-ERROR] Logged: ${error.message || error}`,
         );
       }
     } catch (e) {}
