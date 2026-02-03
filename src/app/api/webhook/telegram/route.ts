@@ -26,14 +26,14 @@ const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
 // Initialize Gemini (Standard Stable)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// Types
+// Types as Requested by User
 type BotState =
   | "IDLE"
   | "AWAITING_NAME"
   | "AWAITING_PRICE"
   | "AWAITING_CATEGORY"
   | "AWAITING_APPROVAL"
-  | "AWAITING_MANUAL_DESC"
+  | "AWAITING_MANUAL_DESC" // CORRECT NAME
   | "AWAITING_FINAL_CONFIRMATION"
   | "SELECTING_PRODUCT_EDIT"
   | "SELECTING_PRODUCT_DISABLE"
@@ -394,7 +394,7 @@ export async function POST(req: Request) {
           "✅ Descripción aprobada. ¿Cuál es el nombre del producto?",
         );
       } else if (data === "edit_desc") {
-        currentState = "AWAITING_MANUAL_EDIT";
+        currentState = "AWAITING_MANUAL_DESC"; // CORRECTED
         await sendMessage(
           chatId,
           "✍️ Envía la nueva descripción del producto:",
@@ -427,7 +427,7 @@ export async function POST(req: Request) {
           name: draft.name,
           price: draft.price,
           image_url: draft.image_url,
-          category_id: draft.category_id, // CORRECTION: Use category_id mapping
+          category_id: draft.category_id,
           ai_description: draft.ai_description || null,
           approval_status: "approved",
           in_stock: true,
@@ -606,7 +606,7 @@ export async function POST(req: Request) {
         await sendMessage(chatId, "Por favor usa los botones para confirmar.");
         break;
 
-      case "AWAITING_MANUAL_EDIT":
+      case "AWAITING_MANUAL_DESC": // CORRECTED
         if (update.message.text) {
           draft = { ...draft, ai_description: update.message.text }; // Update Desc
           currentState = "AWAITING_NAME";
@@ -687,7 +687,7 @@ export async function POST(req: Request) {
         break;
 
       case "AWAITING_CATEGORY":
-        // Legacy/Fallback handling to prevent switch error
+        // Legacy/Fallback
         currentState = "IDLE";
         break;
 
