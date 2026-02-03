@@ -139,10 +139,10 @@ async function uploadImageToSupabase(
 async function sendMainMenu(chatId: number) {
   const keyboard = {
     inline_keyboard: [
-      [{ text: "➕ Crear", callback_data: "action_create" }],
-      [{ text: "📝 Editar", callback_data: "action_edit" }],
-      [{ text: "🚫 Desactivar", callback_data: "action_disable" }],
-      [{ text: "🗑️ Eliminar", callback_data: "action_delete" }],
+      [{ text: "➕ Crear Producto", callback_data: "cmd_create" }],
+      [{ text: "📝 Editar Producto", callback_data: "cmd_edit" }],
+      [{ text: "🚫 Desactivar", callback_data: "cmd_disable" }],
+      [{ text: "🗑️ Eliminar", callback_data: "cmd_delete" }],
     ],
   };
   await sendMessage(
@@ -156,35 +156,52 @@ async function listProductsAsButtons(
   chatId: number,
   action: "edit" | "disable" | "delete",
 ) {
-  await sendMessage(chatId, "Buscando productos en la base de datos...");
+  try {
+    await sendMessage(chatId, "Buscando productos en la base de datos...");
 
-  const { data: products, error } = await supabase
-    .from("products")
-    .select("id, name")
-    .order("id", { ascending: false })
-    .limit(10);
+    const { data: products, error } = await supabase
+      .from("products")
+      .select("id, name")
+      .order("id", { ascending: false })
+      .limit(10);
 
-  if (error || !products || products.length === 0) {
-    await sendMessage(chatId, "No hay productos o hubo un error.");
-    return;
+    if (error) {
+      console.error("DB Error listing products:", error);
+      await sendMessage(
+        chatId,
+        `⚠️ [V1.5-ERROR] No puedo acceder a la tabla products. Verifica los logs. ${error.message}`,
+      );
+      return;
+    }
+
+    if (!products || products.length === 0) {
+      await sendMessage(chatId, "No se encontraron productos.");
+      return;
+    }
+
+    const keyboard = {
+      inline_keyboard: products.map((p) => [
+        { text: p.name, callback_data: `act_${action}_${p.id}` },
+      ]),
+    };
+
+    const actionTextMap = {
+      edit: "editar",
+      disable: "desactivar",
+      delete: "eliminar",
+    };
+    await sendMessage(
+      chatId,
+      `Selecciona el producto a ${actionTextMap[action]}:`,
+      keyboard,
+    );
+  } catch (e: any) {
+    console.error("Exception listing products:", e);
+    await sendMessage(
+      chatId,
+      `⚠️ [V1.5-ERROR] Excepción listando productos: ${e.message}`,
+    );
   }
-
-  const keyboard = {
-    inline_keyboard: products.map((p) => [
-      { text: p.name, callback_data: `act_${action}_${p.id}` },
-    ]),
-  };
-
-  const actionTextMap = {
-    edit: "editar",
-    disable: "desactivar",
-    delete: "eliminar",
-  };
-  await sendMessage(
-    chatId,
-    `Selecciona el producto a ${actionTextMap[action]}:`,
-    keyboard,
-  );
 }
 
 // Main Webhook Handler
@@ -207,14 +224,36 @@ export async function POST(req: Request) {
 
     // 1. Verify Owner (Double check: Env/DB and User Request)
     console.log("🔍 Consultando tg_owner_id en DB...");
-    const { data: config, error: configError } = await supabase
-      .from("config")
-      .select("tg_owner_id, current_state, draft_product")
-      .eq("id", 1)
-      .single();
 
-    if (configError || !config) {
-      console.error("Config fetch error:", configError);
+    let config = null;
+    try {
+      const { data, error } = await supabase
+        .from("config")
+        .select("tg_owner_id, current_state, draft_product")
+        .eq("id", 1)
+        .single();
+
+      if (error) {
+        console.error("Config fetch error:", error);
+        // Fallback response for 42703 or other DB errors
+        await sendMessage(
+          chatId,
+          `⚠️ [V1.5-ERROR] No puedo acceder a la tabla config. Verifica los logs de Vercel. ${error.message}`,
+        );
+        return NextResponse.json({ ok: true });
+      }
+      config = data;
+    } catch (e: any) {
+      console.error("Config fetch exception:", e);
+      await sendMessage(
+        chatId,
+        `⚠️ [V1.5-ERROR] Excepción crítica accediendo a DB. ${e.message}`,
+      );
+      return NextResponse.json({ ok: true });
+    }
+
+    if (!config) {
+      // Should be caught above, but safety check
       return NextResponse.json({ ok: true });
     }
 
@@ -235,20 +274,20 @@ export async function POST(req: Request) {
       const data = update.callback_query.data;
       await answerCallbackQuery(update.callback_query.id);
 
-      if (data === "action_create") {
+      if (data === "cmd_create") {
         await sendMessage(
           chatId,
           "Iniciando creación. 📸 Por favor, envía la foto del regalito.",
         );
         draft = {};
         currentState = "IDLE";
-      } else if (data === "action_disable") {
+      } else if (data === "cmd_disable") {
         await listProductsAsButtons(chatId, "disable");
         currentState = "SELECTING_PRODUCT_DISABLE";
-      } else if (data === "action_delete") {
+      } else if (data === "cmd_delete") {
         await listProductsAsButtons(chatId, "delete");
         currentState = "SELECTING_PRODUCT_DELETE";
-      } else if (data === "action_edit") {
+      } else if (data === "cmd_edit") {
         await listProductsAsButtons(chatId, "edit");
         currentState = "SELECTING_PRODUCT_EDIT";
       } else if (data.startsWith("act_disable_")) {
@@ -297,11 +336,18 @@ export async function POST(req: Request) {
 
     // --- HANDLE TEXT COMMANDS ---
     if (update.message?.text === "/start") {
-      await supabase
-        .from("config")
-        .update({ current_state: "IDLE", draft_product: {} })
-        .eq("id", 1);
-      await sendMainMenu(chatId);
+      try {
+        await supabase
+          .from("config")
+          .update({ current_state: "IDLE", draft_product: {} })
+          .eq("id", 1);
+        await sendMainMenu(chatId);
+      } catch (e: any) {
+        await sendMessage(
+          chatId,
+          `⚠️ [V1.5-ERROR] Error al reiniciar estado. ${e.message}`,
+        );
+      }
       return NextResponse.json({ ok: true });
     }
 
@@ -426,7 +472,7 @@ export async function POST(req: Request) {
       if (chatId) {
         await sendMessage(
           chatId,
-          `⚠️ Error del sistema: ${error.message || error}`,
+          `⚠️ [V1.5-ERROR] Excepción general: ${error.message || error}`,
         );
       }
     } catch (e) {}
