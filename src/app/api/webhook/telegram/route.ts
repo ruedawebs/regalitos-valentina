@@ -13,6 +13,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // Constants
 const MSG_PREFIX = "[V1.5-CONTROL]";
 const OWNER_ID_CHECK = "8343591065";
+const BUILD_TAG = "BUILD_2026_GEMINI_VISION";
 
 // Initialize Clients
 const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
@@ -79,9 +80,9 @@ interface TelegramUpdate {
 
 // Helpers
 async function logError(error: any, payload: any) {
-  console.error(">>> ERROR DETECTED:", error);
+  console.error(`[${BUILD_TAG}] >>> ERROR DETECTED:`, error);
   try {
-    console.log(">>> DB: INSERT antigravity_logs");
+    console.log(`[${BUILD_TAG}] >>> DB: INSERT antigravity_logs`);
     await supabase.from("antigravity_logs").insert({
       error: JSON.stringify(error, Object.getOwnPropertyNames(error)),
       payload: payload,
@@ -141,7 +142,7 @@ async function uploadImageToSupabase(
   fileName: string,
 ): Promise<string | null> {
   try {
-    console.log(">>> DB: UPLOAD catalog-images", fileName);
+    console.log(`[${BUILD_TAG}] >>> DB: UPLOAD catalog-images`, fileName);
     const { data, error } = await supabase.storage
       .from("catalog-images")
       .upload(fileName, buffer, {
@@ -176,6 +177,7 @@ async function uploadImageToSupabase(
 async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
   if (!genAI) return "Descripción automática no disponible (Token faltante).";
   try {
+    console.log(`[${BUILD_TAG}] >>> GEMINI Request Started`);
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const prompt =
       "Describe este producto para una tienda de regalos. Sé breve, atractivo y enfocado en la venta. Máximo 2 frases.";
@@ -193,11 +195,11 @@ async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
     ]);
     const response = await result.response;
     const text = response.text();
-    console.log(">>> GEMINI SUCCESS: Descripción generada.");
+    console.log(`[${BUILD_TAG}] >>> GEMINI SUCCESS: Descripción generada.`);
     return text;
   } catch (e: any) {
-    console.error("Gemini Error:", e);
-    return `Error generando descripción: ${e.message}`;
+    console.error(`[${BUILD_TAG}] >>> GEMINI Error:`, e);
+    throw new Error(`🐞 Error en vision: ${e.message}`);
   }
 }
 
@@ -224,7 +226,7 @@ async function listProductsAsButtons(
   try {
     await sendMessage(chatId, "Buscando productos en la base de datos...");
 
-    console.log(">>> DB: SELECT products (list)");
+    console.log(`[${BUILD_TAG}] >>> DB: SELECT products (list)`);
     const { data: products, error } = await supabase
       .from("products")
       .select("id, name")
@@ -269,7 +271,10 @@ export async function POST(req: Request) {
     const body = await req.json();
     update = body;
 
-    console.log(">>> WEBHOOK RECEIVE:", JSON.stringify(body, null, 2));
+    console.log(
+      `[${BUILD_TAG}] >>> WEBHOOK RECEIVE:`,
+      JSON.stringify(body, null, 2),
+    );
 
     const message = update?.message || update?.callback_query?.message;
     const fromUser = update?.message?.from || update?.callback_query?.from;
@@ -284,7 +289,7 @@ export async function POST(req: Request) {
     // 1. Verify Owner
     let config = null;
     try {
-      console.log(">>> DB: SELECT config (owner check)");
+      console.log(`[${BUILD_TAG}] >>> DB: SELECT config (owner check)`);
       const { data, error } = await supabase
         .from("config")
         .select("tg_owner_id, current_state, draft_product")
@@ -294,7 +299,7 @@ export async function POST(req: Request) {
       if (error) throw error;
       config = data;
 
-      console.log(">>> CURRENT STATE:", config.current_state);
+      console.log(`[${BUILD_TAG}] >>> CURRENT STATE: ${config.current_state}`);
     } catch (e: any) {
       await logError(e, { userId, stage: "config_fetch" });
       await sendMessage(
@@ -308,7 +313,7 @@ export async function POST(req: Request) {
     const isHardcodedOwner = String(userId) === OWNER_ID_CHECK;
 
     if (!isDbOwner && !isHardcodedOwner) {
-      console.warn("Unauthorized:", userId);
+      console.warn(`[${BUILD_TAG}] Unauthorized:`, userId);
       await sendMessage(chatId, `⚠️ Acceso denegado. ID: ${userId}.`);
       return NextResponse.json({ ok: true });
     }
@@ -338,20 +343,21 @@ export async function POST(req: Request) {
         await listProductsAsButtons(chatId, "edit");
         currentState = "SELECTING_PRODUCT_EDIT";
       } else if (data === "approve_desc") {
-        // Changed from gemini_approve
         currentState = "AWAITING_NAME";
         await sendMessage(
           chatId,
           "✅ Descripción aprobada. ¿Cuál es el nombre del producto?",
         );
       } else if (data === "retry_desc") {
-        // Changed from gemini_retry
         currentState = "IDLE";
         draft = {};
         await sendMessage(chatId, "🔄 Reiniciando. Envía otra foto.");
       } else if (data.startsWith("act_disable_")) {
         const productId = data.split("_")[2];
-        console.log(">>> DB: UPDATE products (disable)", productId);
+        console.log(
+          `[${BUILD_TAG}] >>> DB: UPDATE products (disable)`,
+          productId,
+        );
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -368,7 +374,7 @@ export async function POST(req: Request) {
         currentState = "IDLE";
       } else if (data.startsWith("act_delete_")) {
         const productId = data.split("_")[2];
-        console.log(">>> DB: DELETE products", productId);
+        console.log(`[${BUILD_TAG}] >>> DB: DELETE products`, productId);
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -382,7 +388,7 @@ export async function POST(req: Request) {
         currentState = "IDLE";
       }
 
-      console.log(">>> DB: UPDATE config (state)", { currentState, draft });
+      console.log(`[${BUILD_TAG}] >>> DB: UPDATE config (state)`);
       await supabase
         .from("config")
         .update({ current_state: currentState, draft_product: draft })
@@ -392,7 +398,7 @@ export async function POST(req: Request) {
 
     // --- HANDLE TEXT COMMANDS ---
     if (update?.message?.text === "/start") {
-      console.log(">>> DB: UPDATE config (reset)");
+      console.log(`[${BUILD_TAG}] >>> DB: UPDATE config (reset)`);
       await supabase
         .from("config")
         .update({ current_state: "IDLE", draft_product: {} })
@@ -402,7 +408,7 @@ export async function POST(req: Request) {
     }
 
     if (update?.message?.text === "/status") {
-      console.log(">>> DB: SELECT products (count)");
+      console.log(`[${BUILD_TAG}] >>> DB: SELECT products (count)`);
       const { count } = await supabase
         .from("products")
         .select("*", { count: "exact", head: true });
@@ -447,28 +453,41 @@ export async function POST(req: Request) {
               }
 
               if (publicUrl) {
-                // Gemini Vision
-                const description =
-                  await generateGeminiDescription(imageBuffer);
+                try {
+                  // Gemini Vision with specific error handling
+                  const description =
+                    await generateGeminiDescription(imageBuffer);
 
-                draft = {
-                  ...draft,
-                  image_url: publicUrl,
-                  ai_description: description,
-                };
-                currentState = "AWAITING_APPROVAL";
+                  draft = {
+                    ...draft,
+                    image_url: publicUrl,
+                    ai_description: description,
+                  };
+                  currentState = "AWAITING_APPROVAL";
 
-                const keyboard = {
-                  inline_keyboard: [
-                    [{ text: "✅ Aprobar", callback_data: "approve_desc" }], // Updated Label and Data
-                    [{ text: "🔄 Generar otra", callback_data: "retry_desc" }], // Updated Label and Data
-                  ],
-                };
-                await sendMessage(
-                  chatId,
-                  `🤖 **Descripción Sugerida:**\n"${description}"\n\n¿Deseas usar esta descripción?`,
-                  keyboard,
-                );
+                  const keyboard = {
+                    inline_keyboard: [
+                      [{ text: "✅ Aprobar", callback_data: "approve_desc" }],
+                      [
+                        {
+                          text: "🔄 Generar otra",
+                          callback_data: "retry_desc",
+                        },
+                      ],
+                    ],
+                  };
+                  await sendMessage(
+                    chatId,
+                    `🤖 **Descripción Sugerida:**\n"${description}"\n\n¿Deseas usar esta descripción?`,
+                    keyboard,
+                  );
+                } catch (geminiError: any) {
+                  await logError(geminiError, { stage: "gemini_generation" });
+                  await sendMessage(
+                    chatId,
+                    geminiError.message || "Error desconocido en visión.",
+                  );
+                }
               } else {
                 await sendMessage(
                   chatId,
@@ -534,7 +553,7 @@ export async function POST(req: Request) {
             approval_status: "approved", // Auto approve if flow completes
             in_stock: true,
           };
-          console.log(">>> DB: INSERT products", newProduct);
+          console.log(`[${BUILD_TAG}] >>> DB: INSERT products`, newProduct);
           const { error: insertError } = await supabase
             .from("products")
             .insert(newProduct);
@@ -553,7 +572,9 @@ export async function POST(req: Request) {
         break;
     }
 
-    console.log(">>> DB: UPDATE config (loop end)", { currentState });
+    console.log(`[${BUILD_TAG}] >>> DB: UPDATE config (loop end)`, {
+      currentState,
+    });
     await supabase
       .from("config")
       .update({ current_state: currentState, draft_product: draft })
