@@ -151,6 +151,14 @@ async function uploadImageToSupabase(
 
     if (error) {
       console.error("Supabase upload error:", error);
+      // Bucket check logic
+      if (
+        (error as any).statusCode === "404" ||
+        error.message?.includes("Bucket not found") ||
+        error.message?.includes("The resource was not found")
+      ) {
+        throw new Error("BUCKET_NOT_FOUND");
+      }
       return null;
     }
 
@@ -159,7 +167,8 @@ async function uploadImageToSupabase(
       .getPublicUrl(fileName);
 
     return publicUrlData.publicUrl;
-  } catch (e) {
+  } catch (e: any) {
+    if (e.message === "BUCKET_NOT_FOUND") throw e;
     console.error("Image upload failed:", e);
     return null;
   }
@@ -168,20 +177,26 @@ async function uploadImageToSupabase(
 async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
   if (!genAI) return "Descripción automática no disponible (Token faltante).";
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-pro-vision" });
+    // Migration to Gemini 1.5 Flash
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const prompt =
       "Describe este producto para una tienda de regalos. Sé breve, atractivo y enfocado en la venta. Máximo 2 frases.";
+
+    const base64Data = imageBuffer.toString("base64");
+
     const result = await model.generateContent([
       prompt,
       {
         inlineData: {
-          data: imageBuffer.toString("base64"),
+          data: base64Data,
           mimeType: "image/jpeg",
         },
       },
     ]);
     const response = await result.response;
-    return response.text();
+    const text = response.text();
+    console.log(">>> GEMINI SUCCESS: Descripción generada.");
+    return text;
   } catch (e: any) {
     console.error("Gemini Error:", e);
     return `Error generando descripción: ${e.message}`;
@@ -402,7 +417,10 @@ export async function POST(req: Request) {
     switch (currentState) {
       case "IDLE":
         if (update.message.photo) {
-          await sendMessage(chatId, "✨ Analizando imagen con Gemini 2.0...");
+          await sendMessage(
+            chatId,
+            "✨ Analizando imagen con Gemini 1.5 Flash...",
+          ); // Updated Text
           const photo = update.message.photo[update.message.photo.length - 1];
           const fileUrl = await getFileUrl(photo.file_id);
 
@@ -411,15 +429,29 @@ export async function POST(req: Request) {
             if (imageBuffer) {
               const fileName = `${Date.now()}.jpg`;
               // Upload
-              const publicUrl = await uploadImageToSupabase(
-                imageBuffer,
-                fileName,
-              );
-
-              // Gemini Vision
-              const description = await generateGeminiDescription(imageBuffer);
+              let publicUrl: string | null = null;
+              try {
+                publicUrl = await uploadImageToSupabase(imageBuffer, fileName);
+              } catch (e: any) {
+                if (e.message === "BUCKET_NOT_FOUND") {
+                  await sendMessage(
+                    chatId,
+                    "⚠️ Error: El bucket 'catalog-images' no existe en Supabase",
+                  );
+                  // Stop execution to restart
+                  await supabase
+                    .from("config")
+                    .update({ current_state: "IDLE", draft_product: {} })
+                    .eq("id", 1);
+                  return NextResponse.json({ ok: true });
+                }
+              }
 
               if (publicUrl) {
+                // Gemini Vision
+                const description =
+                  await generateGeminiDescription(imageBuffer);
+
                 draft = {
                   ...draft,
                   image_url: publicUrl,
@@ -444,7 +476,10 @@ export async function POST(req: Request) {
                   keyboard,
                 );
               } else {
-                await sendMessage(chatId, "Error subiendo imagen.");
+                await sendMessage(
+                  chatId,
+                  "Error subiendo imagen (Revise logs).",
+                );
               }
             } else {
               await sendMessage(chatId, "Error descargando imagen.");
