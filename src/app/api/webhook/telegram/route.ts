@@ -79,8 +79,9 @@ interface TelegramUpdate {
 
 // Helpers
 async function logError(error: any, payload: any) {
-  console.error("❌ Log Error:", error);
+  console.error(">>> ERROR DETECTED:", error); // Debugger Req
   try {
+    console.log(">>> DB: INSERT antigravity_logs"); // Debugger Req
     await supabase.from("antigravity_logs").insert({
       error: JSON.stringify(error, Object.getOwnPropertyNames(error)),
       payload: payload,
@@ -140,6 +141,7 @@ async function uploadImageToSupabase(
   fileName: string,
 ): Promise<string | null> {
   try {
+    console.log(">>> DB: UPLOAD catalog-images", fileName); // Debugger Req
     const { data, error } = await supabase.storage
       .from("catalog-images")
       .upload(fileName, buffer, {
@@ -209,6 +211,7 @@ async function listProductsAsButtons(
   try {
     await sendMessage(chatId, "Buscando productos en la base de datos...");
 
+    console.log(">>> DB: SELECT products (list)"); // Debugger Req
     const { data: products, error } = await supabase
       .from("products")
       .select("id, name")
@@ -250,10 +253,11 @@ async function listProductsAsButtons(
 export async function POST(req: Request) {
   let update: TelegramUpdate | null = null;
   try {
-    update = await req.json();
-    // Debug Logging
-    const fromId = update?.message?.from.id || update?.callback_query?.from.id;
-    console.log("📥 [V1.5] Mensaje Recibido de ID: " + fromId);
+    const body = await req.json();
+    update = body;
+
+    // Debug Logging (Debugger Req)
+    console.log(">>> WEBHOOK RECEIVE:", JSON.stringify(body, null, 2));
 
     const message = update?.message || update?.callback_query?.message;
     const fromUser = update?.message?.from || update?.callback_query?.from;
@@ -268,6 +272,7 @@ export async function POST(req: Request) {
     // 1. Verify Owner
     let config = null;
     try {
+      console.log(">>> DB: SELECT config (owner check)"); // Debugger Req
       const { data, error } = await supabase
         .from("config")
         .select("tg_owner_id, current_state, draft_product")
@@ -276,6 +281,8 @@ export async function POST(req: Request) {
 
       if (error) throw error;
       config = data;
+
+      console.log(">>> CURRENT STATE:", config.current_state); // Debugger Req
     } catch (e: any) {
       await logError(e, { userId, stage: "config_fetch" });
       await sendMessage(
@@ -330,6 +337,7 @@ export async function POST(req: Request) {
         await sendMessage(chatId, "🔄 Reiniciando. Envía otra foto.");
       } else if (data.startsWith("act_disable_")) {
         const productId = data.split("_")[2];
+        console.log(">>> DB: UPDATE products (disable)", productId); // Debugger Req
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -346,6 +354,7 @@ export async function POST(req: Request) {
         currentState = "IDLE";
       } else if (data.startsWith("act_delete_")) {
         const productId = data.split("_")[2];
+        console.log(">>> DB: DELETE products", productId); // Debugger Req
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -357,14 +366,9 @@ export async function POST(req: Request) {
           `🗑️ Producto ${prod?.name || productId} eliminado.`,
         );
         currentState = "IDLE";
-      } else if (data.startsWith("act_edit_")) {
-        await sendMessage(
-          chatId,
-          "🛠️ Función de edición específica en desarrollo.",
-        );
-        currentState = "IDLE";
       }
 
+      console.log(">>> DB: UPDATE config (state)", { currentState, draft }); // Debugger Req
       await supabase
         .from("config")
         .update({ current_state: currentState, draft_product: draft })
@@ -374,6 +378,7 @@ export async function POST(req: Request) {
 
     // --- HANDLE TEXT COMMANDS ---
     if (update?.message?.text === "/start") {
+      console.log(">>> DB: UPDATE config (reset)"); // Debugger Req
       await supabase
         .from("config")
         .update({ current_state: "IDLE", draft_product: {} })
@@ -383,6 +388,7 @@ export async function POST(req: Request) {
     }
 
     if (update?.message?.text === "/status") {
+      console.log(">>> DB: SELECT products (count)"); // Debugger Req
       const { count } = await supabase
         .from("products")
         .select("*", { count: "exact", head: true });
@@ -499,6 +505,7 @@ export async function POST(req: Request) {
             approval_status: "approved", // Auto approve if flow completes
             in_stock: true,
           };
+          console.log(">>> DB: INSERT products", newProduct); // Debugger Req
           const { error: insertError } = await supabase
             .from("products")
             .insert(newProduct);
@@ -512,20 +519,12 @@ export async function POST(req: Request) {
         }
         break;
 
-      case "SELECTING_PRODUCT_DISABLE":
-      case "SELECTING_PRODUCT_DELETE":
-      case "SELECTING_PRODUCT_EDIT":
-        await sendMessage(
-          chatId,
-          "Por favor selecciona una opción del menú de arriba.",
-        );
-        break;
-
       default:
         await sendMessage(chatId, "Opción no válida.");
         break;
     }
 
+    console.log(">>> DB: UPDATE config (loop end)", { currentState }); // Debugger Req
     await supabase
       .from("config")
       .update({ current_state: currentState, draft_product: draft })
