@@ -30,12 +30,12 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 type BotState =
   | "IDLE"
   | "AWAITING_APPROVAL"
-  | "AWAITING_MANUAL_EDIT" // NEW
+  | "AWAITING_MANUAL_EDIT"
   | "AWAITING_NAME"
   | "AWAITING_PRICE"
-  | "SELECTING_CATEGORY" // NEW
-  | "AWAITING_NEW_CATEGORY_NAME" // NEW
-  | "AWAITING_FINAL_CONFIRMATION" // NEW
+  | "SELECTING_CATEGORY"
+  | "AWAITING_NEW_CATEGORY_NAME"
+  | "AWAITING_FINAL_CONFIRMATION"
   | "SELECTING_PRODUCT_EDIT"
   | "SELECTING_PRODUCT_DISABLE"
   | "SELECTING_PRODUCT_DELETE";
@@ -587,7 +587,7 @@ export async function POST(req: Request) {
               } else {
                 await sendMessage(
                   chatId,
-                  "Error subiendo imagen (Revise logs).",
+                  "Error subiendo imagen (Revise logs logs).",
                 );
               }
             } else {
@@ -633,7 +633,7 @@ export async function POST(req: Request) {
           const price = parseFloat(update.message.text);
           if (!isNaN(price)) {
             draft = { ...draft, price: price };
-            currentState = "SELECTING_CATEGORY"; // Changed from AWAITING_CATEGORY
+            currentState = "SELECTING_CATEGORY";
 
             const kb = await getCategoriesKeyboard();
             if (kb) {
@@ -669,7 +669,6 @@ export async function POST(req: Request) {
               chatId,
               `Cannot create category: ${error.message}`,
             );
-            // Optional: retry or go back
           } else {
             draft = {
               ...draft,
@@ -685,11 +684,6 @@ export async function POST(req: Request) {
       case "SELECTING_CATEGORY":
       case "AWAITING_FINAL_CONFIRMATION":
         await sendMessage(chatId, "Por favor usa los botones del menú.");
-        break;
-
-      // Legacy/Unused logic fallback
-      case "AWAITING_CATEGORY":
-        currentState = "IDLE"; // No longer used
         break;
 
       default:
