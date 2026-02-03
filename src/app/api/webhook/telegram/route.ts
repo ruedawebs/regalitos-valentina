@@ -79,9 +79,9 @@ interface TelegramUpdate {
 
 // Helpers
 async function logError(error: any, payload: any) {
-  console.error(">>> ERROR DETECTED:", error); // Debugger Req
+  console.error(">>> ERROR DETECTED:", error);
   try {
-    console.log(">>> DB: INSERT antigravity_logs"); // Debugger Req
+    console.log(">>> DB: INSERT antigravity_logs");
     await supabase.from("antigravity_logs").insert({
       error: JSON.stringify(error, Object.getOwnPropertyNames(error)),
       payload: payload,
@@ -141,7 +141,7 @@ async function uploadImageToSupabase(
   fileName: string,
 ): Promise<string | null> {
   try {
-    console.log(">>> DB: UPLOAD catalog-images", fileName); // Debugger Req
+    console.log(">>> DB: UPLOAD catalog-images", fileName);
     const { data, error } = await supabase.storage
       .from("catalog-images")
       .upload(fileName, buffer, {
@@ -151,7 +151,6 @@ async function uploadImageToSupabase(
 
     if (error) {
       console.error("Supabase upload error:", error);
-      // Bucket check logic
       if (
         (error as any).statusCode === "404" ||
         error.message?.includes("Bucket not found") ||
@@ -177,7 +176,6 @@ async function uploadImageToSupabase(
 async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
   if (!genAI) return "Descripción automática no disponible (Token faltante).";
   try {
-    // Migration to Gemini 1.5 Flash
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const prompt =
       "Describe este producto para una tienda de regalos. Sé breve, atractivo y enfocado en la venta. Máximo 2 frases.";
@@ -226,7 +224,7 @@ async function listProductsAsButtons(
   try {
     await sendMessage(chatId, "Buscando productos en la base de datos...");
 
-    console.log(">>> DB: SELECT products (list)"); // Debugger Req
+    console.log(">>> DB: SELECT products (list)");
     const { data: products, error } = await supabase
       .from("products")
       .select("id, name")
@@ -271,7 +269,6 @@ export async function POST(req: Request) {
     const body = await req.json();
     update = body;
 
-    // Debug Logging (Debugger Req)
     console.log(">>> WEBHOOK RECEIVE:", JSON.stringify(body, null, 2));
 
     const message = update?.message || update?.callback_query?.message;
@@ -287,7 +284,7 @@ export async function POST(req: Request) {
     // 1. Verify Owner
     let config = null;
     try {
-      console.log(">>> DB: SELECT config (owner check)"); // Debugger Req
+      console.log(">>> DB: SELECT config (owner check)");
       const { data, error } = await supabase
         .from("config")
         .select("tg_owner_id, current_state, draft_product")
@@ -297,7 +294,7 @@ export async function POST(req: Request) {
       if (error) throw error;
       config = data;
 
-      console.log(">>> CURRENT STATE:", config.current_state); // Debugger Req
+      console.log(">>> CURRENT STATE:", config.current_state);
     } catch (e: any) {
       await logError(e, { userId, stage: "config_fetch" });
       await sendMessage(
@@ -340,19 +337,21 @@ export async function POST(req: Request) {
       } else if (data === "cmd_edit") {
         await listProductsAsButtons(chatId, "edit");
         currentState = "SELECTING_PRODUCT_EDIT";
-      } else if (data === "gemini_approve") {
+      } else if (data === "approve_desc") {
+        // Changed from gemini_approve
         currentState = "AWAITING_NAME";
         await sendMessage(
           chatId,
           "✅ Descripción aprobada. ¿Cuál es el nombre del producto?",
         );
-      } else if (data === "gemini_retry") {
+      } else if (data === "retry_desc") {
+        // Changed from gemini_retry
         currentState = "IDLE";
         draft = {};
         await sendMessage(chatId, "🔄 Reiniciando. Envía otra foto.");
       } else if (data.startsWith("act_disable_")) {
         const productId = data.split("_")[2];
-        console.log(">>> DB: UPDATE products (disable)", productId); // Debugger Req
+        console.log(">>> DB: UPDATE products (disable)", productId);
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -369,7 +368,7 @@ export async function POST(req: Request) {
         currentState = "IDLE";
       } else if (data.startsWith("act_delete_")) {
         const productId = data.split("_")[2];
-        console.log(">>> DB: DELETE products", productId); // Debugger Req
+        console.log(">>> DB: DELETE products", productId);
         const { data: prod } = await supabase
           .from("products")
           .select("name")
@@ -383,7 +382,7 @@ export async function POST(req: Request) {
         currentState = "IDLE";
       }
 
-      console.log(">>> DB: UPDATE config (state)", { currentState, draft }); // Debugger Req
+      console.log(">>> DB: UPDATE config (state)", { currentState, draft });
       await supabase
         .from("config")
         .update({ current_state: currentState, draft_product: draft })
@@ -393,7 +392,7 @@ export async function POST(req: Request) {
 
     // --- HANDLE TEXT COMMANDS ---
     if (update?.message?.text === "/start") {
-      console.log(">>> DB: UPDATE config (reset)"); // Debugger Req
+      console.log(">>> DB: UPDATE config (reset)");
       await supabase
         .from("config")
         .update({ current_state: "IDLE", draft_product: {} })
@@ -403,7 +402,7 @@ export async function POST(req: Request) {
     }
 
     if (update?.message?.text === "/status") {
-      console.log(">>> DB: SELECT products (count)"); // Debugger Req
+      console.log(">>> DB: SELECT products (count)");
       const { count } = await supabase
         .from("products")
         .select("*", { count: "exact", head: true });
@@ -420,7 +419,7 @@ export async function POST(req: Request) {
           await sendMessage(
             chatId,
             "✨ Analizando imagen con Gemini 1.5 Flash...",
-          ); // Updated Text
+          );
           const photo = update.message.photo[update.message.photo.length - 1];
           const fileUrl = await getFileUrl(photo.file_id);
 
@@ -461,13 +460,8 @@ export async function POST(req: Request) {
 
                 const keyboard = {
                   inline_keyboard: [
-                    [
-                      {
-                        text: "✅ Aprobar y Publicar",
-                        callback_data: "gemini_approve",
-                      },
-                    ],
-                    [{ text: "🔄 Reintentar", callback_data: "gemini_retry" }],
+                    [{ text: "✅ Aprobar", callback_data: "approve_desc" }], // Updated Label and Data
+                    [{ text: "🔄 Generar otra", callback_data: "retry_desc" }], // Updated Label and Data
                   ],
                 };
                 await sendMessage(
@@ -540,7 +534,7 @@ export async function POST(req: Request) {
             approval_status: "approved", // Auto approve if flow completes
             in_stock: true,
           };
-          console.log(">>> DB: INSERT products", newProduct); // Debugger Req
+          console.log(">>> DB: INSERT products", newProduct);
           const { error: insertError } = await supabase
             .from("products")
             .insert(newProduct);
@@ -559,7 +553,7 @@ export async function POST(req: Request) {
         break;
     }
 
-    console.log(">>> DB: UPDATE config (loop end)", { currentState }); // Debugger Req
+    console.log(">>> DB: UPDATE config (loop end)", { currentState });
     await supabase
       .from("config")
       .update({ current_state: currentState, draft_product: draft })
@@ -568,7 +562,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   } catch (error: any) {
     await logError(error, update);
-    // Try to notify
     try {
       const chatId =
         update?.message?.chat.id || update?.callback_query?.message?.chat.id;
