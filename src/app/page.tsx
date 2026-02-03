@@ -1,65 +1,139 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useMemo } from "react";
+import { useCatalog } from "@/hooks/useCatalog";
+import Navbar from "@/components/ui/Navbar";
+import ProductGrid from "@/components/product/ProductGrid";
+import { motion, AnimatePresence } from "framer-motion";
 
 export default function Home() {
+  const { config, categories, products, loading } = useCatalog();
+  const [selectedCategory, setSelectedCategory] = useState<number | "all">(
+    "all",
+  );
+
+  const filteredProducts = useMemo(() => {
+    if (selectedCategory === "all") return products;
+    return products.filter((p) => p.category_id === selectedCategory);
+  }, [selectedCategory, products]);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <div className="min-h-screen bg-[hsl(var(--background))]">
+      <Navbar />
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Hero Section - Gradient & Premium Look */}
+        <section className="relative mb-16 overflow-hidden rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white shadow-2xl">
+          {/* Background Decoration */}
+          <div className="absolute top-0 right-0 -mt-20 -mr-20 w-80 h-80 bg-[hsl(var(--primary))] rounded-full blur-[100px] opacity-20"></div>
+          <div className="absolute bottom-0 left-0 -mb-20 -ml-20 w-80 h-80 bg-[hsl(var(--accent))] rounded-full blur-[100px] opacity-20"></div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.7 }}
+            className="relative z-10 py-16 px-6 sm:py-24 sm:px-12 text-center"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            <span className="inline-block py-1 px-3 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-xs font-bold tracking-widest uppercase mb-6 text-blue-200">
+              San Valentín 2026
+            </span>
+            <h1 className="text-5xl sm:text-7xl font-black mb-6 tracking-tight leading-none font-[family-name:var(--font-main)]">
+              {config?.store_name || "Regalitos Valentina"}
+            </h1>
+            <p className="text-xl sm:text-2xl font-light text-slate-300 max-w-2xl mx-auto mb-10 leading-relaxed">
+              Descubre detalles únicos que crean momentos inolvidables.{" "}
+              <br className="hidden sm:block" />
+              Regalos con alma y estilo.
+            </p>
+
+            <button className="bg-white text-slate-900 px-8 py-4 rounded-full font-bold hover:bg-gray-100 transition-colors shadow-lg hover:shadow-white/25 transform hover:-translate-y-1">
+              Explorar Colección
+            </button>
+          </motion.div>
+        </section>
+
+        {/* Category Filters */}
+        <section className="mb-12 overflow-x-auto pb-6 scrollbar-hide">
+          <div className="flex justify-center flex-wrap gap-3 px-2">
+            <FilterButton
+              label="✨ Todos"
+              isActive={selectedCategory === "all"}
+              onClick={() => setSelectedCategory("all")}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+            {categories.map((category) => (
+              <FilterButton
+                key={category.id}
+                label={category.name}
+                isActive={selectedCategory === category.id}
+                onClick={() => setSelectedCategory(category.id)}
+              />
+            ))}
+          </div>
+        </section>
+
+        {/* Product Grid / Loading State */}
+        <AnimatePresence mode="wait">
+          {loading ? (
+            <motion.div
+              key="loader"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="grid grid-cols-2 lg:grid-cols-4 gap-6 lg:gap-10"
+            >
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="bg-white p-0 rounded-2xl border border-gray-100 flex flex-col h-[400px] overflow-hidden"
+                >
+                  <div className="bg-gray-200 w-full h-[70%] animate-pulse" />
+                  <div className="p-4 space-y-3">
+                    <div className="bg-gray-200 h-6 w-3/4 rounded animate-pulse" />
+                    <div className="bg-gray-200 h-4 w-1/2 rounded animate-pulse" />
+                  </div>
+                </div>
+              ))}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="content"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="pb-24"
+            >
+              <ProductGrid products={filteredProducts} />
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
     </div>
+  );
+}
+
+// Sub-component for Filter Buttons
+function FilterButton({
+  label,
+  isActive,
+  onClick,
+}: {
+  label: string;
+  isActive: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`
+        px-6 py-2.5 rounded-full text-sm font-bold transition-all duration-300 transform
+        ${
+          isActive
+            ? "bg-[hsl(var(--primary))] text-white shadow-xl shadow-[hsl(var(--primary))/0.3] scale-105"
+            : "bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-900 border border-gray-100"
+        }
+      `}
+    >
+      {label}
+    </button>
   );
 }
