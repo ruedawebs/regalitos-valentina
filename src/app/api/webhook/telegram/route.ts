@@ -30,9 +30,12 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 type BotState =
   | "IDLE"
   | "AWAITING_APPROVAL"
+  | "AWAITING_MANUAL_EDIT" // NEW
   | "AWAITING_NAME"
   | "AWAITING_PRICE"
-  | "AWAITING_CATEGORY"
+  | "SELECTING_CATEGORY" // NEW
+  | "AWAITING_NEW_CATEGORY_NAME" // NEW
+  | "AWAITING_FINAL_CONFIRMATION" // NEW
   | "SELECTING_PRODUCT_EDIT"
   | "SELECTING_PRODUCT_DISABLE"
   | "SELECTING_PRODUCT_DELETE";
@@ -267,6 +270,44 @@ async function listProductsAsButtons(
   }
 }
 
+async function getCategoriesKeyboard() {
+  console.log(`[${BUILD_TAG}] >>> DB: SELECT categories`);
+  const { data: categories, error } = await supabase
+    .from("categories")
+    .select("id, name")
+    .order("name", { ascending: true });
+
+  if (error) {
+    console.error("Error fetching categories", error);
+    return null;
+  }
+
+  const buttons =
+    categories?.map((c) => [
+      { text: c.name, callback_data: `cat_select_${c.id}` },
+    ]) || [];
+  buttons.push([{ text: "➕ Nueva Categoría", callback_data: "cat_new" }]);
+
+  return { inline_keyboard: buttons };
+}
+
+async function sendConfirmationSummary(chatId: number, draft: any) {
+  const summary =
+    `📋 **Resumen del Producto:**\n\n` +
+    `🔹 **Nombre:** ${draft.name}\n` +
+    `💰 **Precio:** ${draft.price}\n` +
+    `📂 **Categoría:** ${draft.category_name || "N/A"}\n\n` +
+    `¿Confirmas la creación?`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "✅ Confirmar", callback_data: "final_confirm" }],
+      [{ text: "❌ Cancelar", callback_data: "final_cancel" }],
+    ],
+  };
+  await sendMessage(chatId, summary, keyboard);
+}
+
 // Main Webhook Handler
 export async function POST(req: Request) {
   let update: TelegramUpdate | null = null;
@@ -349,12 +390,69 @@ export async function POST(req: Request) {
         currentState = "AWAITING_NAME";
         await sendMessage(
           chatId,
-          "✅ Descripción confirmada. ¿Cuál es el nombre del producto?",
+          "✅ Descripción aprobada. ¿Cuál es el nombre del producto?",
+        );
+      } else if (data === "edit_desc") {
+        currentState = "AWAITING_MANUAL_EDIT";
+        await sendMessage(
+          chatId,
+          "✍️ Envía la nueva descripción del producto:",
         );
       } else if (data === "retry_desc") {
         currentState = "IDLE";
         draft = {};
         await sendMessage(chatId, "🔄 Entendido. Envía otra foto.");
+      } else if (data.startsWith("cat_select_")) {
+        const catId = data.split("cat_select_")[1];
+        // Fetch category name for summary
+        const { data: cat } = await supabase
+          .from("categories")
+          .select("name")
+          .eq("id", catId)
+          .single();
+
+        draft = {
+          ...draft,
+          category_id: catId,
+          category_name: cat?.name || "Desconocida",
+        };
+        currentState = "AWAITING_FINAL_CONFIRMATION";
+        await sendConfirmationSummary(chatId, draft);
+      } else if (data === "cat_new") {
+        currentState = "AWAITING_NEW_CATEGORY_NAME";
+        await sendMessage(chatId, "Escribe el nombre de la nueva categoría:");
+      } else if (data === "final_confirm") {
+        const newProduct = {
+          name: draft.name,
+          price: draft.price,
+          image_url: draft.image_url,
+          category: draft.category_id, // UUID
+          // category: draft.category_name, // Optional: if legacy text needed
+          ai_description: draft.ai_description || null,
+          approval_status: "approved",
+          in_stock: true,
+        };
+        console.log(`[${BUILD_TAG}] >>> DB: INSERT products`, newProduct);
+        const { error: insertError } = await supabase
+          .from("products")
+          .insert(newProduct);
+        if (insertError) {
+          await sendMessage(
+            chatId,
+            `❌ Error al guardar: ${insertError.message}`,
+          );
+        } else {
+          await sendMessage(
+            chatId,
+            "✅ Producto guardado y publicado con éxito.",
+          );
+        }
+        currentState = "IDLE";
+        draft = {};
+      } else if (data === "final_cancel") {
+        currentState = "IDLE";
+        draft = {};
+        await sendMessage(chatId, "❌ Creación cancelada.");
       } else if (data.startsWith("act_disable_")) {
         const productId = data.split("_")[2];
         console.log(
@@ -410,15 +508,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true });
     }
 
-    if (update?.message?.text === "/status") {
-      console.log(`[${BUILD_TAG}] >>> DB: SELECT products (count)`);
-      const { count } = await supabase
-        .from("products")
-        .select("*", { count: "exact", head: true });
-      await sendMessage(chatId, `✅ Estado Operativo. Productos: ${count}.`);
-      return NextResponse.json({ ok: true });
-    }
-
     // --- FSM LOGIC ---
     if (!update?.message) return NextResponse.json({ ok: true });
 
@@ -446,7 +535,6 @@ export async function POST(req: Request) {
                     chatId,
                     "⚠️ Error: El bucket 'catalog-images' no existe en Supabase",
                   );
-                  // Stop execution to restart
                   await supabase
                     .from("config")
                     .update({ current_state: "IDLE", draft_product: {} })
@@ -475,6 +563,7 @@ export async function POST(req: Request) {
                           callback_data: "approve_desc",
                         },
                       ],
+                      [{ text: "✍️ Editar", callback_data: "edit_desc" }], // New Button
                       [
                         {
                           text: "🔄 Intentar de nuevo",
@@ -514,8 +603,18 @@ export async function POST(req: Request) {
         break;
 
       case "AWAITING_APPROVAL":
-        // Should be handled by callback, but if text text sent:
         await sendMessage(chatId, "Por favor usa los botones para confirmar.");
+        break;
+
+      case "AWAITING_MANUAL_EDIT":
+        if (update.message.text) {
+          draft = { ...draft, ai_description: update.message.text }; // Update Desc
+          currentState = "AWAITING_NAME";
+          await sendMessage(
+            chatId,
+            "✅ Descripción actualizada. ¿Cuál es el nombre del producto?",
+          );
+        }
         break;
 
       case "AWAITING_NAME":
@@ -534,44 +633,63 @@ export async function POST(req: Request) {
           const price = parseFloat(update.message.text);
           if (!isNaN(price)) {
             draft = { ...draft, price: price };
-            currentState = "AWAITING_CATEGORY";
-            await sendMessage(
-              chatId,
-              `Precio: ${price}. ¿Cuál es la categoría?`,
-            );
+            currentState = "SELECTING_CATEGORY"; // Changed from AWAITING_CATEGORY
+
+            const kb = await getCategoriesKeyboard();
+            if (kb) {
+              await sendMessage(
+                chatId,
+                `Precio: ${price}. Selecciona la Categoría:`,
+                kb,
+              );
+            } else {
+              await sendMessage(
+                chatId,
+                "Error cargando categorías. (Check logs)",
+              );
+            }
           } else {
             await sendMessage(chatId, "Por favor envía un número.");
           }
         }
         break;
 
-      case "AWAITING_CATEGORY":
+      case "AWAITING_NEW_CATEGORY_NAME":
         if (update.message.text) {
-          const category = update.message.text;
-          const newProduct = {
-            name: draft.name,
-            price: draft.price,
-            image_url: draft.image_url,
-            category: category,
-            ai_description: draft.ai_description || null,
-            approval_status: "approved", // Auto approve if flow completes
-            in_stock: true,
-          };
-          console.log(`[${BUILD_TAG}] >>> DB: INSERT products`, newProduct);
-          const { error: insertError } = await supabase
-            .from("products")
-            .insert(newProduct);
-          if (insertError) {
-            throw insertError;
-          } else {
+          const newCatName = update.message.text;
+          console.log(`[${BUILD_TAG}] >>> DB: INSERT categories`, newCatName);
+          const { data: newCat, error } = await supabase
+            .from("categories")
+            .insert({ name: newCatName })
+            .select()
+            .single();
+
+          if (error) {
             await sendMessage(
               chatId,
-              "✅ Producto guardado y publicado con éxito.",
+              `Cannot create category: ${error.message}`,
             );
+            // Optional: retry or go back
+          } else {
+            draft = {
+              ...draft,
+              category_id: newCat.id,
+              category_name: newCat.name,
+            };
+            currentState = "AWAITING_FINAL_CONFIRMATION";
+            await sendConfirmationSummary(chatId, draft);
           }
-          currentState = "IDLE";
-          draft = {};
         }
+        break;
+
+      case "SELECTING_CATEGORY":
+      case "AWAITING_FINAL_CONFIRMATION":
+        await sendMessage(chatId, "Por favor usa los botones del menú.");
+        break;
+
+      // Legacy/Unused logic fallback
+      case "AWAITING_CATEGORY":
+        currentState = "IDLE"; // No longer used
         break;
 
       default:
