@@ -423,6 +423,31 @@ export async function POST(req: Request) {
         currentState = "AWAITING_NEW_CATEGORY_NAME";
         await sendMessage(chatId, "Escribe el nombre de la nueva categoría:");
       } else if (data === "final_confirm") {
+        // 1. SECURITY & STATE GUARD: Prevent "Ghost Sessions"
+        if (currentState !== "AWAITING_FINAL_CONFIRMATION") {
+          console.warn(
+            `[${BUILD_TAG}] Security Alert: Attempted final_confirm from state ${currentState}`,
+          );
+          await sendMessage(
+            chatId,
+            "⚠️ **Sesión Expirada**\n\nEsta sesión ya no es válida. Por favor inicia un nuevo proceso con /start.",
+          );
+          return NextResponse.json({ ok: true });
+        }
+
+        // 2. DATA INTEGRITY CHECK
+        if (!draft.name || !draft.price || !draft.category_id) {
+          console.error(
+            `[${BUILD_TAG}] Validation Failed: Missing fields`,
+            draft,
+          );
+          await sendMessage(
+            chatId,
+            "❌ **Error de Validación**\n\nFaltan datos obligatorios (Nombre, Precio o Categoría). Por favor intenta de nuevo.",
+          );
+          return NextResponse.json({ ok: true });
+        }
+
         const newProduct = {
           name: draft.name,
           price: draft.price,
