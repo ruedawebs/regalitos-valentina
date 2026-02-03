@@ -15,7 +15,7 @@ const MSG_PREFIX = "[V1.5-CONTROL]";
 const OWNER_ID_CHECK = "8343591065";
 const BUILD_TAG = "BUILD_2026_GEMINI_VISION";
 
-// Initialize Clients
+// Initialize Supabase
 const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
   auth: {
     persistSession: false,
@@ -23,10 +23,9 @@ const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!, {
   },
 });
 
-let genAI: GoogleGenerativeAI | null = null;
-if (GEMINI_API_KEY) {
-  genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-}
+// Initialize Gemini (Standard Stable)
+// User Requirement: Force initialization without v1beta mentions
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 // Types
 type BotState =
@@ -175,15 +174,21 @@ async function uploadImageToSupabase(
 }
 
 async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
-  if (!genAI) return "Descripción automática no disponible (Token faltante).";
+  // Check key availability - although init is global, runtime check is safe
+  if (!GEMINI_API_KEY)
+    return "Descripción automática no disponible (Token faltante).";
+
   try {
-    console.log(`[${BUILD_TAG}] >>> GEMINI Request Started`);
+    console.log(`[${BUILD_TAG}] >>> GEMINI Request Started (1.5 Flash Stable)`);
+
+    // Use gemini-1.5-flash as requested
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
     const prompt =
       "Describe este producto para una tienda de regalos. Sé breve, atractivo y enfocado en la venta. Máximo 2 frases.";
-
     const base64Data = imageBuffer.toString("base64");
 
+    // Standard payload for 1.5
     const result = await model.generateContent([
       prompt,
       {
@@ -193,6 +198,7 @@ async function generateGeminiDescription(imageBuffer: Buffer): Promise<string> {
         },
       },
     ]);
+
     const response = await result.response;
     const text = response.text();
     console.log(`[${BUILD_TAG}] >>> GEMINI SUCCESS: Descripción generada.`);
@@ -454,10 +460,12 @@ export async function POST(req: Request) {
 
               if (publicUrl) {
                 try {
-                  // Gemini Vision with specific error handling
+                  // Gemini Vision: generates text but DOES NOT persist product yet
                   const description =
                     await generateGeminiDescription(imageBuffer);
 
+                  // CheckPoint: If success, move to AWAITING_APPROVAL
+                  // If fail, it will be caught below and state remains IDLE (retry possible)
                   draft = {
                     ...draft,
                     image_url: publicUrl,
@@ -482,6 +490,7 @@ export async function POST(req: Request) {
                     keyboard,
                   );
                 } catch (geminiError: any) {
+                  // Error in Generation -> Notify and Log. State stays IDLE (user can re-upload)
                   await logError(geminiError, { stage: "gemini_generation" });
                   await sendMessage(
                     chatId,
